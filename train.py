@@ -16,8 +16,8 @@ Usage:
     py train.py --sources wikitext:wikitext-103-raw-v1:1   # custom data
     py train.py --phase_start 62580 --max_steps 142580     # continue from checkpoint
 
-Teacher: openai-community/gpt2-xl (1.5B params, same 50257-token vocab as student)
-  Downloaded automatically on first run (~3GB). Uses ~3GB VRAM for inference.
+Teacher: mistralai/Mistral-7B-v0.1 (7B params, same 32768-token vocab as student)
+  Downloaded automatically on first run (~14GB BF16). Uses ~14GB VRAM for inference.
   Disable with --no_distill if VRAM is tight or you want faster iteration.
 """
 
@@ -158,7 +158,25 @@ def save_checkpoint(model, optimiser, step, val_loss, cfg: TrainConfig, keep=3):
     }, path)
     print(f"  [checkpoint → {path}]")
 
-    files = sorted(f for f in os.listdir(cfg.checkpoint_dir) if f.endswith(".pt"))
+    # Save best checkpoint separately (never rotated out)
+    best_path = os.path.join(cfg.checkpoint_dir, "best.pt")
+    prev_best = None
+    if os.path.exists(best_path):
+        prev_best = torch.load(best_path, map_location="cpu", weights_only=False).get("val_loss")
+    if prev_best is None or val_loss < prev_best:
+        torch.save({
+            "step":      step,
+            "model":     model.state_dict(),
+            "optimiser": optimiser.state_dict(),
+            "val_loss":  val_loss,
+            "model_cfg": model.cfg,
+            "train_cfg": cfg,
+        }, best_path)
+        print(f"  [new best checkpoint → val_loss {val_loss:.4f}]")
+
+    # Rotate old checkpoints (exclude best.pt)
+    files = sorted(f for f in os.listdir(cfg.checkpoint_dir)
+                   if f.endswith(".pt") and f != "best.pt")
     for old in files[:-keep]:
         os.remove(os.path.join(cfg.checkpoint_dir, old))
         print(f"  [deleted: {old}]")
@@ -269,6 +287,8 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
     ce_accum       = 0.0
     kl_accum       = 0.0
     log_steps      = 0
+    best_train_loss = float("inf")   # tracks smoothed training loss for spike detection
+    spike_threshold = 2.0            # halt if loss exceeds best × this factor
 
     for step in range(start_step, train_cfg.max_steps):
 
@@ -312,6 +332,20 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
         optimiser.step()
         log_steps += 1
 
+        # ----- Loss spike / NaN detection -----
+        current_loss = loss_accum / log_steps if log_steps > 0 else 0.0
+        if step > start_step + 100:  # let loss stabilise first
+            if math.isnan(current_loss) or math.isinf(current_loss):
+                print(f"\n*** NaN/Inf loss detected at step {step}! ***")
+                print(f"    Stopping training. Roll back to best.pt or latest checkpoint.")
+                return
+            if best_train_loss < float("inf") and current_loss > best_train_loss * spike_threshold:
+                print(f"\n*** Loss spike detected at step {step}! ***")
+                print(f"    Current loss: {current_loss:.4f}  |  Best: {best_train_loss:.4f}  |  Ratio: {current_loss/best_train_loss:.1f}×")
+                print(f"    Stopping training. Resume from best.pt:")
+                print(f"    py train.py --checkpoint_dir {train_cfg.checkpoint_dir} ...")
+                return
+
         # ----- Logging -----
         if step % train_cfg.log_every == 0:
             t1  = time.time()
@@ -335,6 +369,8 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
                     f"step {step:7d} | loss {avg_loss:.4f} | "
                     f"lr {lr:.2e} | {tok_per_sec/1e3:.1f}K tok/s"
                 )
+            if avg_loss < best_train_loss:
+                best_train_loss = avg_loss
             loss_accum = ce_accum = kl_accum = 0.0
             log_steps  = 0
 
@@ -359,7 +395,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train a ~200M GPT (v2: RoPE + distillation)")
 
     # Model
-    p.add_argument("--vocab_size",  type=int,   default=50257)
+    p.add_argument("--vocab_size",  type=int,   default=32768)
     p.add_argument("--max_seq_len", type=int,   default=1024)
     p.add_argument("--d_model",     type=int,   default=1024)
     p.add_argument("--n_heads",     type=int,   default=16)
@@ -395,8 +431,8 @@ def parse_args():
     # Distillation
     p.add_argument("--no_distill",     action="store_true",
                    help="Disable knowledge distillation (CE loss only)")
-    p.add_argument("--teacher_model",  default="openai-community/gpt2-xl",
-                   help="HuggingFace model ID for the teacher (default: gpt2-xl)")
+    p.add_argument("--teacher_model",  default="mistralai/Mistral-7B-v0.1",
+                   help="HuggingFace model ID for the teacher (default: Mistral-7B-v0.1)")
     p.add_argument("--distill_alpha",  type=float, default=0.5,
                    help="Weight for CE loss; (1-alpha) for distillation KL loss")
     p.add_argument("--distill_temp",   type=float, default=2.0,

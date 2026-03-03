@@ -140,7 +140,10 @@ py generate.py --checkpoint checkpoints/step_0070000.pt --prompt "def fibonacci(
 - Cosine LR schedule with linear warmup
 - AdamW optimiser with decoupled weight decay (applied only to 2D+ parameters)
 - Gradient clipping (max norm 1.0)
-- Checkpoint rotation (keeps only N most recent)
+- **Loss spike detection**: monitors training loss and halts automatically if it exceeds 2x the best observed loss, preventing silent model corruption
+- **NaN/Inf detection**: stops training immediately on numerical instability
+- **Best checkpoint preservation**: the checkpoint with the lowest validation loss is always saved as `best.pt` and is never rotated out, guaranteeing a recovery point
+- Checkpoint rotation (keeps only N most recent, excluding `best.pt`)
 - `--phase_start` for clean multi-phase training without LR schedule artifacts
 - Optional `--auto_batch` to probe maximum batch size for available VRAM
 
