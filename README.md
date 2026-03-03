@@ -2,7 +2,7 @@
 
 A ~200M parameter decoder-only transformer language model built from scratch in PyTorch. Implements modern architectural techniques (RoPE, SwiGLU, knowledge distillation) and a full training pipeline from pre-training through supervised fine-tuning.
 
-Built as a deep learning research project to understand LLM internals — every component is written from first principles with no high-level training frameworks.
+Built as a deep learning research project to understand LLM internals. Every component is written from first principles with no high-level training frameworks.
 
 ## Architecture
 
@@ -20,13 +20,13 @@ Built as a deep learning research project to understand LLM internals — every 
 
 ### Key Design Decisions
 
-**RoPE over learned positional embeddings** — Encodes position by rotating Q/K vectors in attention, making the model sensitive to relative token distance by construction. No learned positional parameters; better length generalisation. Used in LLaMA, Mistral, Phi, and every modern open model.
+**RoPE over learned positional embeddings.** Encodes position by rotating Q/K vectors in attention, making the model sensitive to relative token distance by construction. No learned positional parameters; better length generalisation. Used in LLaMA, Mistral, Phi, and every modern open model.
 
-**SwiGLU over GELU** — Gated feed-forward network using `SiLU(gate) * up` with three projections at 2/3 the standard FFN width, matching total parameter count. Empirically converges faster to lower loss (PaLM, LLaMA).
+**SwiGLU over GELU.** Gated feed-forward network using `SiLU(gate) * up` with three projections at 2/3 the standard FFN width, matching total parameter count. Empirically converges faster to lower loss (PaLM, LLaMA).
 
-**Mistral tokenizer (32K vocab)** — Smaller vocabulary than GPT-2's 50K frees ~18M parameters from the embedding table for actual transformer capacity. Shared with the distillation teacher for direct logit-level comparison.
+**Mistral tokenizer (32K vocab).** Smaller vocabulary than GPT-2's 50K frees ~18M parameters from the embedding table for actual transformer capacity. Shared with the distillation teacher for direct logit-level comparison.
 
-**Weight tying** — Embedding and output projection share the same weight matrix, reducing parameters while empirically improving performance.
+**Weight tying.** Embedding and output projection share the same weight matrix, reducing parameters while empirically improving performance.
 
 ## Training Pipeline
 
@@ -41,20 +41,20 @@ Phase 3: Supervised Fine-Tuning (SFT)
     Instruction-following data → conversational behavior
 ```
 
-### Phase 1 — Pre-training
+### Phase 1: Pre-training
 
 Trains on a weighted mix of high-quality educational datasets:
 
-- **Cosmopedia** (openstax, auto_math_text, khanacademy) — synthetic textbook content
-- **OpenWebMath** — mathematical proofs, papers, Stack Exchange
+- **Cosmopedia** (openstax, auto_math_text, khanacademy): synthetic textbook content
+- **OpenWebMath**: mathematical proofs, papers, Stack Exchange
 
-Each source is tokenised once and cached as a flat `uint16` binary file using streaming tokenisation (O(1) memory regardless of dataset size). Sources are mixed by weight at load time with no repetition — total tokens constrained by the most limited source relative to its weight fraction.
+Each source is tokenised once and cached as a flat `uint16` binary file using streaming tokenisation (O(1) memory regardless of dataset size). Sources are mixed by weight at load time with no repetition. Total tokens are constrained by the most limited source relative to its weight fraction.
 
 ```bash
 py train.py --no_distill
 ```
 
-### Phase 2 — Knowledge Distillation
+### Phase 2: Knowledge Distillation
 
 Uses Mistral-7B-v0.1 (7B parameters) as a teacher model. Instead of training only against hard one-hot targets ("the next word is X"), the student also learns to match the teacher's full probability distribution over all 32,768 tokens.
 
@@ -72,9 +72,9 @@ Both models share the same tokenizer, so logit distributions are directly compar
 py train.py --phase_start <step> --max_steps <step+N> --lr 1e-4
 ```
 
-### Phase 3 — Supervised Fine-Tuning
+### Phase 3: Supervised Fine-Tuning
 
-Fine-tunes the pre-trained model on instruction-following data (SlimOrca, Dolly, Alpaca, or any HF dataset with standard schemas). Loss is computed only on assistant response tokens — prompt tokens are masked with `ignore_index=-100` so the model learns to generate responses, not memorise prompts.
+Fine-tunes the pre-trained model on instruction-following data (SlimOrca, Dolly, Alpaca, or any HF dataset with standard schemas). Loss is computed only on assistant response tokens. Prompt tokens are masked with `ignore_index=-100` so the model learns to generate responses, not memorise prompts.
 
 ```bash
 py finetune.py --dataset Open-Orca/SlimOrca
@@ -132,7 +132,7 @@ py generate.py --checkpoint checkpoints/step_0070000.pt --prompt "def fibonacci(
 ### Dataset Pipeline
 - **Streaming tokenisation**: Documents are tokenised and written directly to binary files one at a time, using O(1) memory. Handles datasets with millions of documents (e.g., FineWeb-Edu's 9.6M docs) without memory issues.
 - **Per-source caching**: Each dataset is cached independently as a flat `uint16` numpy array. Re-runs skip download/tokenisation if cache exists.
-- **Weighted mixing**: Multiple sources are mixed by specified weights. Total token count is constrained by the most limited source relative to its weight fraction — no source is ever artificially repeated.
+- **Weighted mixing**: Multiple sources are mixed by specified weights. Total token count is constrained by the most limited source relative to its weight fraction, so no source is ever artificially repeated.
 - **Automatic validation splits**: Datasets without a validation split are shuffled (seed=42) and 2% is carved off as validation.
 
 ### Training Loop
@@ -153,7 +153,7 @@ py generate.py --checkpoint checkpoints/step_0070000.pt --prompt "def fibonacci(
 
 ### SFT Implementation
 - Auto-detects dataset schema (Dolly, Alpaca, prompt/completion formats)
-- Labels masked with -100 for prompt tokens — loss computed only on response tokens
+- Labels masked with -100 for prompt tokens; loss computed only on response tokens
 - Custom collator pads to longest sequence in batch
 - Separate checkpoint directory to preserve pre-training weights
 - Low LR (5e-5) to prevent catastrophic forgetting
@@ -162,7 +162,6 @@ py generate.py --checkpoint checkpoints/step_0070000.pt --prompt "def fibonacci(
 
 ```
 torch >= 2.0
-tiktoken
 datasets
 transformers        # for distillation teacher + Mistral tokenizer
 huggingface_hub
