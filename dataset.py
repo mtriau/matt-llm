@@ -149,18 +149,22 @@ def _cache_source(name: str, config: str, data_dir: str) -> dict:
 # Weighted mixing
 # ---------------------------------------------------------------------------
 
-def _read_n(path: str, n: int) -> np.ndarray:
-    """Read exactly min(n, file_size) uint16 tokens from a binary cache file."""
+def _read_n(path: str, n: int, offset: int = 0) -> np.ndarray:
+    """Read exactly min(n, available) uint16 tokens from a binary cache file,
+    starting at the given token offset."""
     file_n = os.path.getsize(path) // 2
-    count  = min(n, file_n)
-    return np.fromfile(path, dtype=np.uint16, count=count)
+    offset = min(offset, max(file_n - n, 0))
+    count  = min(n, file_n - offset)
+    return np.fromfile(path, dtype=np.uint16, count=count, offset=offset * 2)
 
 
-def _build_mixed(source_infos: list, split: str) -> np.ndarray:
+def _build_mixed(source_infos: list, split: str, data_seed: int = 0) -> np.ndarray:
     """
     Load and mix token arrays for one split.
 
     source_infos: list of {"paths": {"train": ..., "val": ...}, "weight": float}
+    data_seed:    when > 0, each source reads from a random offset into its cache
+                  so different seeds yield different slices of large datasets.
 
     Mixing rule: the total token count is set by whichever source is most
     constrained (smallest tokens / weight-fraction). No source is ever repeated.
@@ -174,20 +178,29 @@ def _build_mixed(source_infos: list, split: str) -> np.ndarray:
     # Total tokens = limited by the most-constrained source
     total = int(min(sz / f for sz, f in zip(file_sizes, fracs)))
 
+    # Generate per-source random offsets from the seed
+    if data_seed > 0:
+        rng = np.random.default_rng(data_seed)
+        offsets = [int(rng.integers(0, max(fs - int(total * f), 1)))
+                   for fs, f in zip(file_sizes, fracs)]
+    else:
+        offsets = [0] * len(source_infos)
+
     parts = []
-    for info, frac, file_sz in zip(source_infos, fracs, file_sizes):
+    for info, frac, file_sz, off in zip(source_infos, fracs, file_sizes, offsets):
         n = int(total * frac)
         if n == 0:
             continue
-        arr = _read_n(info["paths"][split], n)
+        arr = _read_n(info["paths"][split], n, offset=off)
         # Tile only if this source has fewer tokens than its allocation
         if len(arr) < n:
             reps = n // len(arr) + 1
             arr = np.tile(arr, reps)[:n]
         parts.append(arr)
         pct = frac * 100
+        off_str = f", offset={off:,}" if off > 0 else ""
         print(f"  {info['paths'][split].split(os.sep)[-1].replace('_' + split + '.bin', '')}: "
-              f"{n:,} tokens ({pct:.0f}%)")
+              f"{n:,} tokens ({pct:.0f}%{off_str})")
 
     return np.concatenate(parts)
 
@@ -209,14 +222,18 @@ def _load_or_create_cache(cfg: TrainConfig) -> dict:
         paths  = _cache_source(name, config, cfg.data_dir)
         source_infos.append({"paths": paths, "weight": weight})
 
+    seed = getattr(cfg, "data_seed", 0)
+    if seed > 0:
+        print(f"Data seed: {seed} (shuffling read offsets)")
+
     if len(sources) == 1:
         paths = source_infos[0]["paths"]
         train_tok = np.fromfile(paths["train"], dtype=np.uint16)
         val_tok   = np.fromfile(paths["val"],   dtype=np.uint16)
     else:
         print(f"Mixing {len(sources)} sources ...")
-        train_tok = _build_mixed(source_infos, "train")
-        val_tok   = _build_mixed(source_infos, "val")
+        train_tok = _build_mixed(source_infos, "train", data_seed=seed)
+        val_tok   = _build_mixed(source_infos, "val",   data_seed=seed)
 
     print(f"Total: train={len(train_tok):,}  val={len(val_tok):,} tokens")
     return {"train": train_tok, "val": val_tok}

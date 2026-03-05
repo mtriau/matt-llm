@@ -70,8 +70,9 @@ class TrainConfig:
     # ---------------------------------------------------------------------------
     # Defaults to a high-quality reasoning-dense mix:
     #   Cosmopedia (openstax + auto_math_text + khanacademy) + OpenWebMath
-    sources:  list = None
-    data_dir: str  = "data"
+    sources:   list = None
+    data_dir:  str  = "data"
+    data_seed: int  = 0      # >0 = read from random offset into each cache file (different slice each seed)
 
     def __post_init__(self):
         if self.sources is None:

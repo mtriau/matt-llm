@@ -22,6 +22,7 @@ Teacher: mistralai/Mistral-7B-v0.1 (7B params, same 32768-token vocab as student
 """
 
 import os
+import sys
 import math
 import time
 import argparse
@@ -67,8 +68,10 @@ def distill_loss(student_logits: torch.Tensor,
     (Hinton et al., 2015 — "Distilling the Knowledge in a Neural Network").
     """
     T            = temperature
-    log_p_student = F.log_softmax(student_logits.float() / T, dim=-1)
-    p_teacher     = F.softmax(teacher_logits.float()  / T, dim=-1)
+    # Truncate student logits to teacher vocab size if they differ
+    min_vocab     = min(student_logits.size(-1), teacher_logits.size(-1))
+    log_p_student = F.log_softmax(student_logits[..., :min_vocab].float() / T, dim=-1)
+    p_teacher     = F.softmax(teacher_logits[..., :min_vocab].float()  / T, dim=-1)
     kl            = F.kl_div(log_p_student, p_teacher, reduction="batchmean")
     return kl * T * T
 
@@ -412,6 +415,8 @@ def parse_args():
              'Default: Cosmopedia (openstax+auto_math_text+khanacademy) + OpenWebMath'
     )
     p.add_argument("--data_dir", default="data")
+    p.add_argument("--data_seed", type=int, default=0,
+                   help="Random seed for data slice offset (0=read from start, >0=random offset)")
 
     # Training
     p.add_argument("--batch_size",       type=int,   default=8)
@@ -438,52 +443,79 @@ def parse_args():
     p.add_argument("--distill_temp",   type=float, default=2.0,
                    help="Temperature for softening teacher/student distributions")
 
+    # Resume
+    p.add_argument("--resume", action="store_true",
+                   help="Resume training from latest checkpoint using saved config. "
+                        "Ignores all other args except --checkpoint_dir.")
+
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
 
-    model_cfg = ModelConfig(
-        vocab_size  = args.vocab_size,
-        max_seq_len = args.max_seq_len,
-        d_model     = args.d_model,
-        n_heads     = args.n_heads,
-        d_ff        = args.d_ff,
-        n_layers    = args.n_layers,
-        dropout     = args.dropout,
-        use_rope    = not args.no_rope,
-    )
-
-    if args.sources:
-        parsed_sources = []
-        for s in args.sources:
-            parts = s.split(":")
-            parsed_sources.append({
-                "name":   parts[0],
-                "config": parts[1] if len(parts) > 1 else "",
-                "weight": float(parts[2]) if len(parts) > 2 and parts[2] else 1.0,
-            })
+    if args.resume:
+        # Load everything from the latest checkpoint
+        ckpt_dir = args.checkpoint_dir
+        if not os.path.isdir(ckpt_dir):
+            print(f"No checkpoint directory found: {ckpt_dir}")
+            sys.exit(1)
+        files = sorted(f for f in os.listdir(ckpt_dir) if f.endswith(".pt") and f != "best.pt")
+        if not files:
+            print(f"No checkpoints found in {ckpt_dir}")
+            sys.exit(1)
+        path = os.path.join(ckpt_dir, files[-1])
+        print(f"Resuming from {path} (--resume mode)")
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        model_cfg = ckpt["model_cfg"]
+        train_cfg = ckpt["train_cfg"]
+        # Update phase_start to the checkpoint step so LR schedule continues cleanly
+        train_cfg.phase_start = ckpt["step"]
+        print(f"  Restored config: step={ckpt['step']}, lr={train_cfg.lr}, "
+              f"data_seed={getattr(train_cfg, 'data_seed', 0)}, "
+              f"distill={'ON' if train_cfg.teacher_model else 'OFF'}")
     else:
-        parsed_sources = None
+        model_cfg = ModelConfig(
+            vocab_size  = args.vocab_size,
+            max_seq_len = args.max_seq_len,
+            d_model     = args.d_model,
+            n_heads     = args.n_heads,
+            d_ff        = args.d_ff,
+            n_layers    = args.n_layers,
+            dropout     = args.dropout,
+            use_rope    = not args.no_rope,
+        )
 
-    train_cfg = TrainConfig(
-        sources          = parsed_sources,
-        data_dir         = args.data_dir,
-        batch_size       = args.batch_size,
-        grad_accum_steps = args.grad_accum_steps,
-        seq_len          = args.seq_len,
-        lr               = args.lr,
-        max_steps        = args.max_steps,
-        warmup_steps     = args.warmup_steps,
-        phase_start      = args.phase_start,
-        dtype            = args.dtype,
-        compile          = TrainConfig().compile and not args.no_compile,
-        auto_batch       = args.auto_batch,
-        checkpoint_dir   = args.checkpoint_dir,
-        teacher_model    = "" if args.no_distill else args.teacher_model,
-        distill_alpha    = args.distill_alpha,
-        distill_temp     = args.distill_temp,
-    )
+        if args.sources:
+            parsed_sources = []
+            for s in args.sources:
+                parts = s.split(":")
+                parsed_sources.append({
+                    "name":   parts[0],
+                    "config": parts[1] if len(parts) > 1 else "",
+                    "weight": float(parts[2]) if len(parts) > 2 and parts[2] else 1.0,
+                })
+        else:
+            parsed_sources = None
+
+        train_cfg = TrainConfig(
+            sources          = parsed_sources,
+            data_dir         = args.data_dir,
+            batch_size       = args.batch_size,
+            grad_accum_steps = args.grad_accum_steps,
+            seq_len          = args.seq_len,
+            lr               = args.lr,
+            max_steps        = args.max_steps,
+            warmup_steps     = args.warmup_steps,
+            phase_start      = args.phase_start,
+            dtype            = args.dtype,
+            compile          = TrainConfig().compile and not args.no_compile,
+            auto_batch       = args.auto_batch,
+            checkpoint_dir   = args.checkpoint_dir,
+            teacher_model    = "" if args.no_distill else args.teacher_model,
+            distill_alpha    = args.distill_alpha,
+            distill_temp     = args.distill_temp,
+            data_seed        = args.data_seed,
+        )
 
     train(model_cfg, train_cfg)
