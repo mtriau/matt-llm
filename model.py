@@ -243,6 +243,7 @@ class GPT(nn.Module):
         temperature: float = 1.0,
         top_k: int = None,
         top_p: float = None,
+        eos_token_id: int = None,
     ) -> torch.Tensor:
         self.eval()
         for _ in range(max_new_tokens):
@@ -263,5 +264,8 @@ class GPT(nn.Module):
             probs    = logits.softmax(-1)
             next_tok = torch.multinomial(probs, num_samples=1)
             idx      = torch.cat([idx, next_tok], dim=1)
+
+            if eos_token_id is not None and next_tok.item() == eos_token_id:
+                break
 
         return idx

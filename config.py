@@ -113,9 +113,10 @@ class TrainConfig:
     # so logit distributions are directly comparable with no vocab alignment needed.
     # Set teacher_model="" to disable distillation and train with CE loss only.
     # ---------------------------------------------------------------------------
-    teacher_model: str   = "mistralai/Mistral-7B-v0.1"
-    distill_alpha: float = 0.5    # weight for hard CE loss; (1-alpha) for soft distill loss
-    distill_temp:  float = 2.0    # temperature for softening teacher/student distributions
+    teacher_model:       str   = "mistralai/Mistral-7B-v0.1"
+    distill_alpha:       float = 0.5    # weight for hard CE loss; (1-alpha) for soft distill loss
+    distill_temp:        float = 2.0    # temperature for softening teacher/student distributions
+    distill_warmup:      int   = 2000   # steps to ramp KL weight from 0 to (1-alpha)
 
     # ---------------------------------------------------------------------------
     # Logging / checkpointing

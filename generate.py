@@ -37,10 +37,13 @@ def generate(
     top_k: int = 200,
     top_p: float = None,
     device: torch.device = torch.device("cuda"),
+    stop_at_eos: bool = False,
 ) -> str:
     enc = get_tokenizer()
     tokens = enc.encode_ordinary(prompt)
     idx = torch.tensor([tokens], dtype=torch.long, device=device)
+
+    eos_id = enc._tok.eos_token_id if stop_at_eos else None
 
     with torch.no_grad():
         out = model.generate(
@@ -49,9 +52,13 @@ def generate(
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            eos_token_id=eos_id,
         )
 
     new_tokens = out[0, len(tokens):].tolist()
+    # Strip EOS token from output if present
+    if eos_id is not None and new_tokens and new_tokens[-1] == eos_id:
+        new_tokens = new_tokens[:-1]
     return enc._tok.decode(new_tokens)
 
 
@@ -65,15 +72,23 @@ def main():
     parser.add_argument("--top_k",           type=int,   default=200)
     parser.add_argument("--top_p",           type=float, default=None)
     parser.add_argument("--device",          default="cuda")
+    parser.add_argument("--sft",             action="store_true",
+                        help="Wrap prompts in SFT chat format (User: ... Assistant:)")
     args = parser.parse_args()
 
     device = torch.device(args.device)
     print(f"Loading checkpoint: {args.checkpoint}")
     model = load_model(args.checkpoint, device)
-    print(f"Model loaded ({model.count_parameters()/1e6:.1f}M params)\n")
+    print(f"Model loaded ({model.count_parameters()/1e6:.1f}M params)")
+    if args.sft:
+        print("SFT mode: prompts will be wrapped as 'User: {prompt}\\nAssistant:'")
+    print()
 
     def _run(prompt):
-        print(f"\n--- Prompt ---\n{prompt}\n--- Completion ---")
+        display_prompt = prompt
+        if args.sft:
+            prompt = f"User: {prompt}\nAssistant:"
+        print(f"\n--- Prompt ---\n{display_prompt}\n--- Completion ---")
         completion = generate(
             model, prompt,
             max_new_tokens = args.max_new_tokens,
@@ -81,6 +96,7 @@ def main():
             top_k          = args.top_k,
             top_p          = args.top_p,
             device         = device,
+            stop_at_eos    = args.sft,
         )
         print(completion)
         print("---\n")

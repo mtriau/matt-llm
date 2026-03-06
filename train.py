@@ -64,15 +64,17 @@ def distill_loss(student_logits: torch.Tensor,
     """
     KL divergence between teacher and student distributions at given temperature.
 
-    Scaled by T^2 so that the gradient magnitude is independent of temperature
-    (Hinton et al., 2015 — "Distilling the Knowledge in a Neural Network").
+    Returns per-token KL (averaged over batch AND sequence length) scaled by T^2
+    so it's on the same scale as CE loss (~2-5 range).
     """
     T            = temperature
     # Truncate student logits to teacher vocab size if they differ
     min_vocab     = min(student_logits.size(-1), teacher_logits.size(-1))
     log_p_student = F.log_softmax(student_logits[..., :min_vocab].float() / T, dim=-1)
     p_teacher     = F.softmax(teacher_logits[..., :min_vocab].float()  / T, dim=-1)
-    kl            = F.kl_div(log_p_student, p_teacher, reduction="batchmean")
+    # "batchmean" divides by batch but not sequence length — divide manually
+    B, T_seq      = student_logits.shape[:2]
+    kl            = F.kl_div(log_p_student, p_teacher, reduction="batchmean") / T_seq
     return kl * T * T
 
 
@@ -280,7 +282,8 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
     if distill_enabled:
         print(f"\nDistillation ON  — alpha={train_cfg.distill_alpha}  temp={train_cfg.distill_temp}")
         print(f"  Loss = {train_cfg.distill_alpha:.1f} × CE  +  "
-              f"{1-train_cfg.distill_alpha:.1f} × KL(teacher‖student)\n")
+              f"{1-train_cfg.distill_alpha:.1f} × KL(teacher‖student)")
+        print(f"  KL warmup: {train_cfg.distill_warmup} steps (starts pure CE, ramps KL to target)\n")
     else:
         print("\nDistillation OFF — training with CE loss only.\n")
 
@@ -319,8 +322,15 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
                 if distill_enabled:
                     kl_loss  = distill_loss(student_logits, teacher_logits,
                                             train_cfg.distill_temp)
-                    loss     = (train_cfg.distill_alpha * ce_loss
-                                + (1 - train_cfg.distill_alpha) * kl_loss)
+                    # Ramp KL weight from 0 to (1-alpha) over distill_warmup steps
+                    ds = step - train_cfg.phase_start
+                    if ds < train_cfg.distill_warmup:
+                        kl_weight = (1 - train_cfg.distill_alpha) * ds / max(1, train_cfg.distill_warmup)
+                        ce_weight = 1 - kl_weight
+                    else:
+                        ce_weight = train_cfg.distill_alpha
+                        kl_weight = 1 - train_cfg.distill_alpha
+                    loss     = ce_weight * ce_loss + kl_weight * kl_loss
                 else:
                     loss     = ce_loss
                     kl_loss  = torch.tensor(0.0)
@@ -362,9 +372,12 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
             if distill_enabled:
                 avg_ce = ce_accum / log_steps
                 avg_kl = kl_accum / log_steps
+                ds = step - train_cfg.phase_start
+                cur_kl_w = min((1 - train_cfg.distill_alpha) * ds / max(1, train_cfg.distill_warmup),
+                               1 - train_cfg.distill_alpha)
                 print(
                     f"step {step:7d} | loss {avg_loss:.4f} "
-                    f"(ce {avg_ce:.4f}  kl {avg_kl:.4f}) | "
+                    f"(ce {avg_ce:.4f}  kl {avg_kl:.4f}  kl_w {cur_kl_w:.2f}) | "
                     f"lr {lr:.2e} | {tok_per_sec/1e3:.1f}K tok/s"
                 )
             else:
@@ -383,7 +396,7 @@ def train(model_cfg: ModelConfig, train_cfg: TrainConfig):
             print(f"  [val loss: {val_loss:.4f}]")
 
         # ----- Checkpointing -----
-        if step % train_cfg.save_every == 0 and step > 0:
+        if step % train_cfg.save_every == 0 and step > 0 and step > start_step:
             val_loss = estimate_val_loss(model, val_loader, device, dtype)
             save_checkpoint(model, optimiser, step, val_loss, train_cfg)
 
@@ -442,6 +455,8 @@ def parse_args():
                    help="Weight for CE loss; (1-alpha) for distillation KL loss")
     p.add_argument("--distill_temp",   type=float, default=2.0,
                    help="Temperature for softening teacher/student distributions")
+    p.add_argument("--distill_warmup", type=int, default=2000,
+                   help="Steps to ramp KL weight from 0 to (1-alpha). Prevents KL from destabilizing early training.")
 
     # Resume
     p.add_argument("--resume", action="store_true",
@@ -515,6 +530,7 @@ if __name__ == "__main__":
             teacher_model    = "" if args.no_distill else args.teacher_model,
             distill_alpha    = args.distill_alpha,
             distill_temp     = args.distill_temp,
+            distill_warmup   = args.distill_warmup,
             data_seed        = args.data_seed,
         )
 
