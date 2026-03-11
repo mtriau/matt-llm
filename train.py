@@ -179,9 +179,26 @@ def save_checkpoint(model, optimiser, step, val_loss, cfg: TrainConfig, keep=3):
         }, best_path)
         print(f"  [new best checkpoint → val_loss {val_loss:.4f}]")
 
-    # Rotate old checkpoints (exclude best.pt)
+    # Save best distillation checkpoint separately
+    if cfg.teacher_model:
+        distill_best_path = os.path.join(cfg.checkpoint_dir, "best_distill.pt")
+        prev_distill_best = None
+        if os.path.exists(distill_best_path):
+            prev_distill_best = torch.load(distill_best_path, map_location="cpu", weights_only=False).get("val_loss")
+        if prev_distill_best is None or val_loss < prev_distill_best:
+            torch.save({
+                "step":      step,
+                "model":     model.state_dict(),
+                "optimiser": optimiser.state_dict(),
+                "val_loss":  val_loss,
+                "model_cfg": model.cfg,
+                "train_cfg": cfg,
+            }, distill_best_path)
+            print(f"  [new best distill checkpoint → val_loss {val_loss:.4f}]")
+
+    # Rotate old checkpoints (exclude best.pt and best_distill.pt)
     files = sorted(f for f in os.listdir(cfg.checkpoint_dir)
-                   if f.endswith(".pt") and f != "best.pt")
+                   if f.endswith(".pt") and f not in ("best.pt", "best_distill.pt"))
     for old in files[:-keep]:
         os.remove(os.path.join(cfg.checkpoint_dir, old))
         print(f"  [deleted: {old}]")

@@ -76,7 +76,13 @@ def _stream_to_file(doc_iter, path: str) -> int:
     n = 0
     with open(path, "wb") as f:
         for doc in doc_iter:
-            text = doc["text"] if isinstance(doc, dict) else doc
+            if not isinstance(doc, dict):
+                text = doc
+            elif "text" in doc:
+                text = doc["text"]
+            else:
+                # Concatenate all string fields (handles Q/A datasets like Orca-Math)
+                text = "\n".join(v for v in doc.values() if isinstance(v, str))
             if not text or not text.strip():
                 continue
             toks = np.array(enc.encode_ordinary(text), dtype=np.uint16)
