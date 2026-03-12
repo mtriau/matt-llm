@@ -66,28 +66,65 @@ def _slug(name: str, config: str = "") -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", key)
 
 
-def _stream_to_file(doc_iter, path: str) -> int:
+def _extract_text(doc) -> str:
+    """Pull text from a document dict (or raw string)."""
+    if not isinstance(doc, dict):
+        return doc
+    if "text" in doc:
+        return doc["text"]
+    if "content" in doc:
+        return doc["content"]
+    return "\n".join(v for v in doc.values() if isinstance(v, str))
+
+
+def _tokenize_batch(texts: list) -> bytes:
+    """Tokenize a list of texts and return raw uint16 bytes. Runs in worker process."""
+    enc = get_tokenizer()
+    parts = []
+    for text in texts:
+        if not text or not text.strip():
+            continue
+        toks = np.array(enc.encode_ordinary(text), dtype=np.uint16)
+        parts.append(toks.tobytes())
+    return b"".join(parts)
+
+
+def _stream_to_file(doc_iter, path: str, n_workers: int = 0) -> int:
     """
     Tokenise documents from an iterator and write directly to a binary file.
-    Never holds more than one document's tokens in memory at a time.
+    Uses multiprocessing when n_workers > 0 for faster tokenisation.
     Returns total token count written.
     """
-    enc = get_tokenizer()
+    if n_workers <= 0:
+        n_workers = min(os.cpu_count() or 1, 16)
+
+    # Collect texts in batches, tokenize in parallel, write sequentially
+    from multiprocessing import Pool
+
+    BATCH_SIZE = 1000
     n = 0
-    with open(path, "wb") as f:
+    batch = []
+
+    with open(path, "wb") as f, Pool(n_workers) as pool:
+        def flush(text_batch):
+            nonlocal n
+            # Split batch across workers
+            chunk_size = max(1, len(text_batch) // n_workers)
+            chunks = [text_batch[i:i + chunk_size]
+                      for i in range(0, len(text_batch), chunk_size)]
+            for raw_bytes in pool.map(_tokenize_batch, chunks):
+                f.write(raw_bytes)
+                n += len(raw_bytes) // 2  # uint16 = 2 bytes
+
         for doc in doc_iter:
-            if not isinstance(doc, dict):
-                text = doc
-            elif "text" in doc:
-                text = doc["text"]
-            else:
-                # Concatenate all string fields (handles Q/A datasets like Orca-Math)
-                text = "\n".join(v for v in doc.values() if isinstance(v, str))
-            if not text or not text.strip():
-                continue
-            toks = np.array(enc.encode_ordinary(text), dtype=np.uint16)
-            toks.tofile(f)
-            n += len(toks)
+            text = _extract_text(doc)
+            batch.append(text)
+            if len(batch) >= BATCH_SIZE:
+                flush(batch)
+                batch = []
+        if batch:
+            flush(batch)
+
     return n
 
 
